@@ -8,15 +8,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
-type walk filepath.WalkFunc
-
-func Migrate(db *sql.DB) error {
+func Migrate(db *sql.DB, dir string) error {
+	if len(dir) == 0 {
+		dir = "migration"
+	}
 	// Buat tabel migrations jika belum ada
 	err := createMigrationsTable(db)
 	if err != nil {
 		return err
+	}
+
+	// Cari semua file SQL dan urutkan
+	files, err := getAllSQLFiles(dir)
+	if err != nil {
+		return fmt.Errorf("failed to list migration files: %v", err)
 	}
 
 	tx, err := db.Begin()
@@ -24,20 +33,12 @@ func Migrate(db *sql.DB) error {
 		return fmt.Errorf("could not begin transaction: %v", err)
 	}
 
-	var mywalk walk = func(path string, info os.FileInfo, err error) error {
-		if filepath.Ext(path) == ".sql" {
-			err := executeSQLFile(tx, path)
-			if err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-		}
-		return nil
-	}
+	defer tx.Rollback()
 
-	err = filepath.Walk("migration", filepath.WalkFunc(mywalk))
-	if err != nil {
-		return fmt.Errorf("error walking the path: %v", err)
+	for _, file := range files {
+		if err := executeSQLFile(tx, file); err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()
@@ -49,7 +50,8 @@ func createMigrationsTable(db *sql.DB) error {
         id SERIAL PRIMARY KEY,
         filename TEXT NOT NULL,
         checksum TEXT NOT NULL,
-        executed_at TIMESTAMPTZ DEFAULT timezone('utc', now())
+        executed_at TIMESTAMPTZ DEFAULT timezone('utc', now()),
+		UNIQUE(filename)
     );`
 	_, err := db.Exec(createTableSQL)
 	if err != nil {
@@ -59,19 +61,41 @@ func createMigrationsTable(db *sql.DB) error {
 	return nil
 }
 
+func getAllSQLFiles(root string) ([]string, error) {
+	var files []string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.ToLower(filepath.Ext(path)) == ".sql" {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	sort.Strings(files)
+
+	return files, err
+}
+
 // executeSQLFile membaca dan mengeksekusi file SQL
 func executeSQLFile(tx *sql.Tx, path string) error {
+	filename := filepath.Base(path)
+
 	// Hitung checksum file SQL
 	checksum, err := calculateChecksum(path)
 	if err != nil {
-		return fmt.Errorf("could not calculate checksum for file %s: %v", path, err)
+		return fmt.Errorf("could not calculate checksum for file %s: %v", filename, err)
 	}
 
 	// Periksa apakah file sudah dieksekusi sebelumnya
 	var exists bool
 	var storedChecksum string
 	err = tx.QueryRow(`
-		SELECT EXISTS(SELECT 1 FROM _migrations WHERE filename = $1), checksum 
+		SELECT 
+			EXISTS(SELECT 1 FROM _migrations WHERE filename = $1),
+            COALESCE((SELECT checksum FROM _migrations WHERE filename = $1), '')
 		FROM _migrations 
 		WHERE filename = $1
 	`, filepath.Base(path)).Scan(&exists, &storedChecksum)
