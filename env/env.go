@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -54,4 +55,28 @@ func EnvDuration(key string, defaultValue time.Duration) time.Duration {
 		return defaultValue
 	}
 	return d
+}
+
+func EnvBool(key string, defaultValue bool) bool {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultValue
+	}
+
+	b, err := strconv.ParseBool(val)
+	if err != nil {
+		return defaultValue
+	}
+
+	return b
+}
+
+func EnvSliceString(key string, defaultValue []string) []string {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultValue
+	}
+	result := strings.Split(val, ",")
+
+	return result
 }
